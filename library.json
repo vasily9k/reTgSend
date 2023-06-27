@@ -1,6 +1,6 @@
 {
   "name": "reTgSend",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "description": "Sending notifications to Telegram",
   "keywords": "telegram",
   "repository": {
@@ -20,6 +20,6 @@
     ".github"
   ],
   "license": "MIT",
-  "platforms": ["espressif32", "linux_x86_64"],
-  "frameworks": ["arduino", "espidf"]
+  "platforms": "*",
+  "frameworks": "*"
 }
