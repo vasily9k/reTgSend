@@ -1,6 +1,6 @@
 {
   "name": "reTgSend",
-  "version": "3.0.3",
+  "version": "3.0.4",
   "description": "Sending notifications to Telegram",
   "keywords": "telegram",
   "repository": {
@@ -14,6 +14,11 @@
       "name": "Alexander Razzhivin",
       "email": "kotyara12@yandex.ru",
       "url": "https://kotyara12.ru"
+    },
+    {
+      "name": "Vasily K",
+      "email": "vasily9k@gmail.com",
+      "url": "https://github.com/vasily9k"
     }
   ],
   "exclude": [
