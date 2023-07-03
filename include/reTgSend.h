@@ -22,6 +22,7 @@
 #include "reTgSend.h"
 #include "reEvents.h"
 #include "reStates.h"
+#include "cJSON.h"
 
 #if defined(CONFIG_TELEGRAM_MESSAGE_SIZE) && (CONFIG_TELEGRAM_MESSAGE_SIZE > 0)
   #define CONFIG_TELEGRAM_STATIC_MESSAGE_BUFFER 1
@@ -39,12 +40,19 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+esp_err_t tgApi();
 
 /**
  * @brief We create and launch a task (and a queue) to send notifications.
  * @return true - successful, false - failure
  * */
 bool tgTaskCreate();
+
+/**
+ * @brief We create and launch a task to handle telegram updates.
+ * @return true - successful, false - failure
+ * */
+bool tgTaskUpdatesCreate();
 
 /**
  * @brief We pause the task for sending notifications. For example, when disconnecting from WiFi.

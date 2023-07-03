@@ -7,6 +7,9 @@
 #include "esp_http_client.h"
 #include "mbedtls/ssl.h"
 
+#include "esp_log.h"
+#include "esp_event.h"
+
 #define API_TELEGRAM_HOST "api.telegram.org"
 #define API_TELEGRAM_PORT 443
 #define API_TELEGRAM_TIMEOUT_MS 60000
@@ -42,6 +45,7 @@ typedef struct {
 #define TELEGRAM_QUEUE_ITEM_SIZE sizeof(tgMessage_t*)
 
 TaskHandle_t _tgTask;
+TaskHandle_t _tgTaskUpdates;
 QueueHandle_t _tgQueue = nullptr;
 #if CONFIG_TELEGRAM_OUTBOX_ENABLE
 static tgMessageItem_t _tgOutbox[CONFIG_TELEGRAM_OUTBOX_SIZE];
@@ -49,6 +53,10 @@ static tgMessageItem_t _tgOutbox[CONFIG_TELEGRAM_OUTBOX_SIZE];
 
 static const char* logTAG = "TG";
 static const char* tgTaskName = "tg_send";
+static const char* tgTaskUpdatesName = "tg_updates";
+int tgTaskUpdatesOffset = -1;
+int update_status = 0;
+const cJSON *res_elem = NULL;
 
 #ifndef CONFIG_TELEGRAM_TLS_PEM_STORAGE
   #define CONFIG_TELEGRAM_TLS_PEM_STORAGE TLS_CERT_BUFFER
@@ -65,6 +73,104 @@ StaticTask_t _tgTaskBuffer;
 StackType_t _tgTaskStack[CONFIG_TELEGRAM_STACK_SIZE];
 uint8_t _tgQueueStorage [CONFIG_TELEGRAM_QUEUE_SIZE * TELEGRAM_QUEUE_ITEM_SIZE];
 #endif // CONFIG_TELEGRAM_STATIC_ALLOCATION
+
+esp_err_t _http_event_handler(esp_http_client_event_t *evt)
+{
+    static char *output_buffer;  // Buffer to store response of http request from event handler
+    static int output_len;       // Stores number of bytes read
+    switch(evt->event_id) {
+        case HTTP_EVENT_ERROR:
+            //rlog_d(logTAG, "HTTP_EVENT_ERROR");
+            break;
+        case HTTP_EVENT_ON_CONNECTED:
+            //rlog_d(logTAG, "HTTP_EVENT_ON_CONNECTED");
+            break;
+        case HTTP_EVENT_HEADER_SENT:
+            //rlog_d(logTAG, "HTTP_EVENT_HEADER_SENT");
+            break;
+        case HTTP_EVENT_ON_HEADER:
+            //rlog_d(logTAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+            break;
+        case HTTP_EVENT_ON_DATA:
+            /*
+             *  Check for chunked encoding is added as the URL for chunked encoding used in this example returns binary data.
+             *  However, event handler can also be used in case chunked encoding is used.
+             */
+            if (!esp_http_client_is_chunked_response(evt->client)) {
+                int copy_len = 0;
+                const int buffer_len = esp_http_client_get_content_length(evt->client)+1;
+                if (output_buffer == NULL) {
+                    output_buffer = (char *) malloc(buffer_len);
+                    output_len = 0;
+                    if (output_buffer == NULL) {
+                        rlog_e(logTAG, "Failed to allocate memory for output buffer");
+                        return ESP_FAIL;
+                    }
+                }
+                copy_len = (((evt->data_len)<((buffer_len - output_len)))?(evt->data_len):((buffer_len - output_len)));
+                if (copy_len) {
+                    memcpy(output_buffer + output_len, evt->data, copy_len);
+                }
+                output_len += copy_len;
+                rlog_d(logTAG, "HTTP_EVENT_ON_DATA, получено=%d, copy_len=%d, output_len=%d", evt->data_len, copy_len, output_len);
+            }
+            break;
+        case HTTP_EVENT_ON_FINISH:
+            rlog_d(logTAG, "HTTP_EVENT_ON_FINISH");
+            update_status = 0;
+            if (output_buffer != NULL) {
+                output_buffer[output_len] = 0;
+                rlog_d(logTAG, "output_len=%d", output_len);
+                rlog_d(logTAG, "output_buffer=\n%s", output_buffer);
+
+                cJSON *resp = cJSON_Parse(output_buffer);
+                cJSON *result = cJSON_GetObjectItemCaseSensitive(resp, "result");
+                cJSON_ArrayForEach(res_elem, result)
+                {
+                    cJSON *update_id = cJSON_GetObjectItemCaseSensitive(res_elem, "update_id");
+                    if (cJSON_IsNumber(update_id))
+                    {
+                        update_status = update_id->valuedouble;
+                        cJSON *message_key = cJSON_GetObjectItemCaseSensitive(res_elem, "message");
+                        cJSON *message_text = cJSON_GetObjectItemCaseSensitive(message_key, "text");
+                        tgTaskUpdatesOffset = update_status + 1;
+                        if (cJSON_IsString(message_text)) {
+                          tgSend(MK_MAIN, MP_CRITICAL, 1, "=====","Получил update №%d. Текст:%s", update_status, message_text->valuestring);
+                        } else {
+                          tgSend(MK_MAIN, MP_CRITICAL, 1, "=====","Получил update №%d. Текста нет!", update_status);
+                        }
+                    }
+                }
+                if (update_status == 0) {
+                  rlog_d(logTAG, "No updates");
+                }
+
+                cJSON_Delete(resp);
+
+                free(output_buffer);
+                output_buffer = NULL;
+
+            }
+            output_len = 0;
+
+            break;
+        case HTTP_EVENT_DISCONNECTED:
+            rlog_d(logTAG, "HTTP_EVENT_DISCONNECTED");
+            if (output_buffer != NULL) {
+                free(output_buffer);
+                output_buffer = NULL;
+            }
+            output_len = 0;
+            break;
+        case HTTP_EVENT_REDIRECT:
+            rlog_d(logTAG, "HTTP_EVENT_REDIRECT");
+            esp_http_client_set_header(evt->client, "From", "user@example.com");
+            esp_http_client_set_header(evt->client, "Accept", "text/html");
+            esp_http_client_set_redirection(evt->client);
+            break;
+    }
+    return ESP_OK;
+}
 
 char* tgNotifyApi(tgMessageItem_t* tgMsg)
 {
@@ -257,6 +363,70 @@ bool tgSendMsg(msg_options_t msgOptions, const char* msgTitle, const char* msgTe
     };
   };
   return false;
+}
+
+esp_err_t tgApi()
+{
+  // Configuring request parameters
+  esp_err_t ret = ESP_FAIL;
+  esp_http_client_config_t cfgHttp;
+
+  memset(&cfgHttp, 0, sizeof(cfgHttp));
+  cfgHttp.method = HTTP_METHOD_GET;
+  cfgHttp.host = API_TELEGRAM_HOST;
+  cfgHttp.port = API_TELEGRAM_PORT;
+
+  char * res = nullptr;
+  res = malloc_stringf("/bot" CONFIG_TELEGRAM_TOKEN "/getUpdates?timeout=60&offset=%d",tgTaskUpdatesOffset);
+  rlog_d(logTAG, "tgApi request update offset:%d",tgTaskUpdatesOffset);
+
+  cfgHttp.path = res;
+  cfgHttp.timeout_ms = API_TELEGRAM_TIMEOUT_MS;
+  cfgHttp.transport_type = HTTP_TRANSPORT_OVER_SSL;
+  #if CONFIG_TELEGRAM_TLS_PEM_STORAGE == TLS_CERT_BUFFER
+    cfgHttp.cert_pem = api_telegram_org_pem_start;
+    cfgHttp.use_global_ca_store = false;
+  #elif CONFIG_TELEGRAM_TLS_PEM_STORAGE == TLS_CERT_GLOBAL
+    cfgHttp.use_global_ca_store = true;
+  #elif CONFIG_TELEGRAM_TLS_PEM_STORAGE == TLS_CERT_BUNGLE
+    cfgHttp.crt_bundle_attach = esp_crt_bundle_attach;
+    cfgHttp.use_global_ca_store = false;
+  #endif // CONFIG_TELEGRAM_TLS_PEM_STORAGE
+  cfgHttp.skip_cert_common_name_check = false;
+  cfgHttp.is_async = false;
+  cfgHttp.event_handler = _http_event_handler;
+
+  // Make request to Telegram API
+  esp_http_client_handle_t client = esp_http_client_init(&cfgHttp);
+  if (client) {
+    esp_http_client_set_header(client, API_TELEGRAM_HEADER_CTYPE, API_TELEGRAM_HEADER_AJSON);
+    ret = esp_http_client_perform(client);
+    if (ret == ESP_OK) {
+      int retCode = esp_http_client_get_status_code(client);
+      rlog_d(logTAG, "HTTP GET Status = %d, content_length = %" PRId64,
+              retCode, esp_http_client_get_content_length(client)
+      );
+      if (retCode == HttpStatus_Ok) {
+        ret = ESP_OK;
+        rlog_v(logTAG, "HTTP GET request to Telegram API done");
+      } else if (retCode == HttpStatus_Forbidden) {
+        ret = ESP_ERR_INVALID_RESPONSE;
+        rlog_w(logTAG, "Failed to send message, too many messages, please wait");
+      } else {
+        ret = ESP_ERR_INVALID_ARG;
+        rlog_e(logTAG, "Failed to send message, API error code: #%d!", retCode);
+      };
+    } else {
+      rlog_e(logTAG, "HTTP GET request to Telegram API failed: %s", esp_err_to_name(ret));
+    };
+    esp_http_client_cleanup(client);
+  } else {
+    ret = ESP_ERR_INVALID_STATE;
+    rlog_e(logTAG, "Failed to complete request to Telegram API!");
+  };
+
+  free(res);
+  return ret;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
@@ -530,3 +700,48 @@ bool tgTaskDelete()
   return true;
 }
 
+// updates task
+void tgTaskUpdatesExec(void *pvParameters)
+{
+  u_int32_t tick = 0;
+  while (true) {
+    rlog_d(logTAG, "tick %d", tick++);
+    while (statesInetWait(portMAX_DELAY)) {
+      esp_err_t tgApiRequest = tgApi();
+
+      if (tgApiRequest == ESP_OK) {
+        rlog_d(logTAG, "Request to Telegram API done.");
+        break;
+      } else {
+        rlog_e(logTAG, "Request to Telegram API failed. Error: %d", tgApiRequest);
+        break;
+      };
+
+    };
+    vTaskDelay(pdMS_TO_TICKS(10));
+  };
+
+  // Delete task
+  tgTaskDelete();
+}
+
+bool tgTaskUpdatesCreate() 
+{
+  if (!_tgTaskUpdates) {
+
+    xTaskCreatePinnedToCore(tgTaskUpdatesExec, tgTaskUpdatesName, 4096, nullptr, CONFIG_TASK_PRIORITY_TELEGRAM, &_tgTaskUpdates, CONFIG_TASK_CORE_TELEGRAM); 
+
+    if (!_tgTaskUpdates) {
+      rloga_e("Failed to create task for Telegram updates!");
+      return false;
+    }
+    else {
+      rloga_d("Task [ %s ] has been successfully started", tgTaskUpdatesName);
+      return true;
+    };
+
+  }
+  else {
+    return true;
+  };
+}
