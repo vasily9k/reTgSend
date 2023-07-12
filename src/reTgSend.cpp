@@ -1,3 +1,5 @@
+#define CONFIG_TELEGRAM_OUTBOX_SIZE 0
+
 #include "reTgSend.h"
 #include <time.h>
 #include "freertos/FreeRTOS.h"
@@ -24,6 +26,29 @@
 #define API_TELEGRAM_TRUE "true"
 
 typedef struct {
+  char* caption;
+  char* id;
+  char* name;
+  int size;
+} tgUpdateDocument_t;
+
+enum tg_message_type_t {
+    TG_MESSAGE_UNKNOWN,
+    TG_MESSAGE_TEXT,
+    TG_MESSAGE_DOCUMENT,
+};
+
+typedef struct {
+  int64_t chat_id;
+  int64_t from_id;
+  u_int32_t date;
+  int update_id;
+  char *text;
+  tgUpdateDocument_t *file;
+  enum tg_message_type_t type;
+} tgUpdateMessage_t;
+
+typedef struct {
   char* message;
   msg_options_t options;
   time_t timestamp;
@@ -47,6 +72,7 @@ typedef struct {
 TaskHandle_t _tgTask;
 TaskHandle_t _tgTaskUpdates;
 QueueHandle_t _tgQueue = nullptr;
+QueueHandle_t _tgInboxQueue = nullptr;
 #if CONFIG_TELEGRAM_OUTBOX_ENABLE
 static tgMessageItem_t _tgOutbox[CONFIG_TELEGRAM_OUTBOX_SIZE];
 #endif // CONFIG_TELEGRAM_OUTBOX_ENABLE
@@ -54,8 +80,9 @@ static tgMessageItem_t _tgOutbox[CONFIG_TELEGRAM_OUTBOX_SIZE];
 static const char* logTAG = "TG";
 static const char* tgTaskName = "tg_send";
 static const char* tgTaskUpdatesName = "tg_updates";
-int tgTaskUpdatesOffset = -1;
+int tgUpdatesOffset = -3;
 int update_status = 0;
+bool maxContentSizeExceeded = false;
 const cJSON *res_elem = NULL;
 
 #ifndef CONFIG_TELEGRAM_TLS_PEM_STORAGE
@@ -73,6 +100,8 @@ StaticTask_t _tgTaskBuffer;
 StackType_t _tgTaskStack[CONFIG_TELEGRAM_STACK_SIZE];
 uint8_t _tgQueueStorage [CONFIG_TELEGRAM_QUEUE_SIZE * TELEGRAM_QUEUE_ITEM_SIZE];
 #endif // CONFIG_TELEGRAM_STATIC_ALLOCATION
+
+bool tgReceiveMsg(cJSON *message, int update_id);
 
 esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 {
@@ -97,9 +126,33 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
              *  However, event handler can also be used in case chunked encoding is used.
              */
             if (!esp_http_client_is_chunked_response(evt->client)) {
-                int copy_len = 0;
-                const int buffer_len = esp_http_client_get_content_length(evt->client)+1;
+                int content_length = esp_http_client_get_content_length(evt->client);
+                const int buffer_len = content_length + 1;
                 if (output_buffer == NULL) {
+                    if (content_length > 2000) {
+                      if (!maxContentSizeExceeded) {
+                        rlog_d(logTAG, "Content_length > 2000: %d. Current tgUpdatesOffset: %d", content_length, tgUpdatesOffset);
+                        if (evt->data_len > 46) {
+                          // Получаем номер апдейта(update_id) из первой порции данных.
+                          // Пользуемся тем, что ответ обычно примерно такой:
+                          // {"ok":true,"result":[{"update_id":39870880, ...
+                          // и update_id всегда начинается с 34-го символа
+                          char str[13];
+                          memcpy(str, evt->data + 34, 12);
+                          str[12] = 0;
+                          int update_id = atoi(str);
+                          if (update_id) {
+                            tgUpdatesOffset = update_id + 1;
+                          } else {
+                            // Если что-то пошло не так, сбрасываем счетчик апдейтов для получения в следующем запросе последнего апдейта
+                            tgUpdatesOffset = -1;
+                          }
+                          rlog_d(logTAG, "\nСледующий апдейт айди будет:%d\n", tgUpdatesOffset);
+                        }
+                      }
+                      maxContentSizeExceeded = true;
+                      return ESP_FAIL;
+                    }
                     output_buffer = (char *) malloc(buffer_len);
                     output_len = 0;
                     if (output_buffer == NULL) {
@@ -107,37 +160,36 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
                         return ESP_FAIL;
                     }
                 }
-                copy_len = (((evt->data_len)<((buffer_len - output_len)))?(evt->data_len):((buffer_len - output_len)));
+
+                int copy_len = (((evt->data_len)<((buffer_len - output_len)))?(evt->data_len):((buffer_len - output_len)));
                 if (copy_len) {
                     memcpy(output_buffer + output_len, evt->data, copy_len);
                 }
                 output_len += copy_len;
                 rlog_d(logTAG, "HTTP_EVENT_ON_DATA, получено=%d, copy_len=%d, output_len=%d", evt->data_len, copy_len, output_len);
             }
-            break;
+            break;        
         case HTTP_EVENT_ON_FINISH:
             rlog_d(logTAG, "HTTP_EVENT_ON_FINISH");
             update_status = 0;
             if (output_buffer != NULL) {
                 output_buffer[output_len] = 0;
-                rlog_d(logTAG, "output_len=%d", output_len);
-                rlog_d(logTAG, "output_buffer=\n%s", output_buffer);
+                rlog_d(logTAG, "output_len=%d. Update:\n%s", output_len, output_buffer);
 
                 cJSON *resp = cJSON_Parse(output_buffer);
                 cJSON *result = cJSON_GetObjectItemCaseSensitive(resp, "result");
-                cJSON_ArrayForEach(res_elem, result)
-                {
+                cJSON_ArrayForEach(res_elem, result) {
                     cJSON *update_id = cJSON_GetObjectItemCaseSensitive(res_elem, "update_id");
-                    if (cJSON_IsNumber(update_id))
-                    {
+                    if (cJSON_IsNumber(update_id)) {
                         update_status = update_id->valuedouble;
-                        cJSON *message_key = cJSON_GetObjectItemCaseSensitive(res_elem, "message");
-                        cJSON *message_text = cJSON_GetObjectItemCaseSensitive(message_key, "text");
-                        tgTaskUpdatesOffset = update_status + 1;
-                        if (cJSON_IsString(message_text)) {
-                          tgSend(MK_MAIN, MP_CRITICAL, 1, "=====","Получил update №%d. Текст:%s", update_status, message_text->valuestring);
-                        } else {
-                          tgSend(MK_MAIN, MP_CRITICAL, 1, "=====","Получил update №%d. Текста нет!", update_status);
+                        tgUpdatesOffset = update_status + 1;
+                        cJSON *message = cJSON_GetObjectItemCaseSensitive(res_elem, "message");
+                        if (cJSON_HasObjectItem(message, "text") || cJSON_HasObjectItem(message, "document")) {
+                          if (tgReceiveMsg(message, update_status)) {
+                            rlog_d(logTAG, "incoming message queued");
+                          } else {
+                            rlog_d(logTAG, "incoming message not queued");
+                          }
                         }
                     }
                 }
@@ -146,13 +198,11 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
                 }
 
                 cJSON_Delete(resp);
-
                 free(output_buffer);
                 output_buffer = NULL;
-
             }
             output_len = 0;
-
+            maxContentSizeExceeded = false;
             break;
         case HTTP_EVENT_DISCONNECTED:
             rlog_d(logTAG, "HTTP_EVENT_DISCONNECTED");
@@ -160,6 +210,7 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
                 free(output_buffer);
                 output_buffer = NULL;
             }
+            maxContentSizeExceeded = false;
             output_len = 0;
             break;
         case HTTP_EVENT_REDIRECT:
@@ -377,8 +428,8 @@ esp_err_t tgApi()
   cfgHttp.port = API_TELEGRAM_PORT;
 
   char * res = nullptr;
-  res = malloc_stringf("/bot" CONFIG_TELEGRAM_TOKEN "/getUpdates?timeout=60&offset=%d",tgTaskUpdatesOffset);
-  rlog_d(logTAG, "tgApi request update offset:%d",tgTaskUpdatesOffset);
+  res = malloc_stringf("/bot" CONFIG_TELEGRAM_TOKEN "/getUpdates?limit=1&timeout=60&offset=%d",tgUpdatesOffset);
+  rlog_d(logTAG, "tgApi request update offset:%d",tgUpdatesOffset);
 
   cfgHttp.path = res;
   cfgHttp.timeout_ms = API_TELEGRAM_TIMEOUT_MS;
@@ -427,6 +478,80 @@ esp_err_t tgApi()
 
   free(res);
   return ret;
+}
+
+bool tgReceiveMsg(cJSON *message, int update_id)
+{
+    if (_tgInboxQueue) {
+    tgUpdateMessage_t* tgMsg = (tgUpdateMessage_t*)esp_calloc(1, sizeof(tgUpdateMessage_t));
+    if (tgMsg) {
+      tgMsg->chat_id = 0;
+      tgMsg->from_id = 0;
+      tgMsg->date = 0;
+      tgMsg->update_id = update_id;
+      tgMsg->type = TG_MESSAGE_UNKNOWN;
+      tgMsg->text = nullptr;
+      tgMsg->file = nullptr;
+
+      /*typedef struct {
+        char* caption;
+        char* id;
+        char* name;
+        int size;
+      } tgUpdateDocument_t;
+      */
+
+      cJSON *message = cJSON_GetObjectItemCaseSensitive(res_elem, "message");
+
+      if (cJSON_HasObjectItem(message, "document")) {
+        tgMsg->type = TG_MESSAGE_DOCUMENT;
+        cJSON *document = cJSON_GetObjectItemCaseSensitive(message, "document");
+
+
+      }
+
+      if (cJSON_HasObjectItem(message, "text")) {
+        tgMsg->type = TG_MESSAGE_TEXT;
+        cJSON *text = cJSON_GetObjectItemCaseSensitive(message, "text");
+        rlog_d(logTAG, "text len=%d. text:%s\n", strlen(text->valuestring), text->valuestring);
+        tgMsg->text = (char*)esp_calloc(1, strlen(text->valuestring)+1);
+        if (tgMsg->text) {
+          memcpy(tgMsg->text, text->valuestring, strlen(text->valuestring));
+          rlog_d(logTAG, "tgMsg->text:%s\n", tgMsg->text);
+        } else {
+          rlog_e(logTAG, "Failed to allocate memory for message text");
+          goto error;
+        };
+      }
+
+      /*
+        int64_t chat_id;
+        int64_t from_id;
+        u_int32_t date;
+        int update_id;
+        char *text;
+        tgUpdateDocument_t *file;
+        enum tg_message_type_t type;
+      */
+
+      if (xQueueSend(_tgInboxQueue, &tgMsg, pdMS_TO_TICKS(CONFIG_TELEGRAM_INBOX_QUEUE_WAIT)) == pdPASS) {
+        return true;
+      } else {
+        rloga_e("Failed to adding message to inbox queue [ _tgInboxQueue ]!");
+        eventLoopPostError(RE_SYS_TELEGRAM_ERROR, ESP_ERR_NO_MEM);
+        goto error;
+      };
+    } else {
+      rlog_e(logTAG, "Failed to allocate memory for message");
+    };
+  error:
+    // Deallocate resources from heap
+    if (tgMsg) {
+      if (tgMsg->text) free(tgMsg->text);
+      free(tgMsg);
+    };
+  };
+  return false;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
@@ -714,6 +839,7 @@ void tgTaskUpdatesExec(void *pvParameters)
         break;
       } else {
         rlog_e(logTAG, "Request to Telegram API failed. Error: %d", tgApiRequest);
+        vTaskDelay(pdMS_TO_TICKS(300));
         break;
       };
 
@@ -725,21 +851,28 @@ void tgTaskUpdatesExec(void *pvParameters)
   tgTaskDelete();
 }
 
-bool tgTaskUpdatesCreate() 
+bool tgTaskUpdatesCreate()
 {
   if (!_tgTaskUpdates) {
-
+    if (!_tgInboxQueue) {
+      _tgInboxQueue = xQueueCreate(4, sizeof(tgUpdateMessage_t*));
+      if (!_tgInboxQueue) {
+        rloga_e("Failed to create a queue for incoming updates from Telegram!");
+        eventLoopPostError(RE_SYS_TELEGRAM_ERROR, ESP_FAIL);
+        return false;
+      };
+    };
     xTaskCreatePinnedToCore(tgTaskUpdatesExec, tgTaskUpdatesName, 4096, nullptr, CONFIG_TASK_PRIORITY_TELEGRAM, &_tgTaskUpdates, CONFIG_TASK_CORE_TELEGRAM); 
-
     if (!_tgTaskUpdates) {
+      vQueueDelete(_tgInboxQueue);
       rloga_e("Failed to create task for Telegram updates!");
+      eventLoopPostError(RE_SYS_TELEGRAM_ERROR, ESP_FAIL);
       return false;
     }
     else {
       rloga_d("Task [ %s ] has been successfully started", tgTaskUpdatesName);
       return true;
     };
-
   }
   else {
     return true;
