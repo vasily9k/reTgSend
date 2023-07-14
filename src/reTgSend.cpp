@@ -25,28 +25,7 @@
 #define API_TELEGRAM_FALSE "false"
 #define API_TELEGRAM_TRUE "true"
 
-typedef struct {
-  char* caption;
-  char* id;
-  char* name;
-  int size;
-} tgUpdateDocument_t;
-
-enum tg_message_type_t {
-    TG_MESSAGE_UNKNOWN,
-    TG_MESSAGE_TEXT,
-    TG_MESSAGE_DOCUMENT,
-};
-
-typedef struct {
-  int64_t chat_id;
-  int64_t from_id;
-  u_int32_t date;
-  int update_id;
-  char *text;
-  tgUpdateDocument_t *file;
-  enum tg_message_type_t type;
-} tgUpdateMessage_t;
+#define CONFIG_TELEGRAM_INBOX_QUEUE_WAIT 3000
 
 typedef struct {
   char* message;
@@ -72,7 +51,7 @@ typedef struct {
 TaskHandle_t _tgTask;
 TaskHandle_t _tgTaskUpdates;
 QueueHandle_t _tgQueue = nullptr;
-QueueHandle_t _tgInboxQueue = nullptr;
+QueueHandle_t *_tgInboxQueue = nullptr;
 #if CONFIG_TELEGRAM_OUTBOX_ENABLE
 static tgMessageItem_t _tgOutbox[CONFIG_TELEGRAM_OUTBOX_SIZE];
 #endif // CONFIG_TELEGRAM_OUTBOX_ENABLE
@@ -482,7 +461,7 @@ esp_err_t tgApi()
 
 bool tgReceiveMsg(cJSON *message, int update_id)
 {
-    if (_tgInboxQueue) {
+  if (*_tgInboxQueue) {
     tgUpdateMessage_t* tgMsg = (tgUpdateMessage_t*)esp_calloc(1, sizeof(tgUpdateMessage_t));
     if (tgMsg) {
       tgMsg->chat_id = 0;
@@ -493,27 +472,59 @@ bool tgReceiveMsg(cJSON *message, int update_id)
       tgMsg->text = nullptr;
       tgMsg->file = nullptr;
 
-      /*typedef struct {
-        char* caption;
-        char* id;
-        char* name;
-        int size;
-      } tgUpdateDocument_t;
-      */
-
       cJSON *message = cJSON_GetObjectItemCaseSensitive(res_elem, "message");
 
       if (cJSON_HasObjectItem(message, "document")) {
         tgMsg->type = TG_MESSAGE_DOCUMENT;
-        cJSON *document = cJSON_GetObjectItemCaseSensitive(message, "document");
+        tgMsg->file = (tgUpdateDocument_t*)esp_calloc(1, sizeof(tgUpdateDocument_t));
+        if (tgMsg->file) {
+          cJSON *document = cJSON_GetObjectItemCaseSensitive(message, "document");
 
+          cJSON *file_name = cJSON_GetObjectItemCaseSensitive(document, "file_name");
+          tgMsg->file->name = (char*)esp_calloc(1, strlen(file_name->valuestring)+1);
+          if (tgMsg->file->name) {
+            memcpy(tgMsg->file->name, file_name->valuestring, strlen(file_name->valuestring));
+          } else {
+            rlog_e(logTAG, "Failed to allocate memory for document name");
+            goto error;
+          };
 
+          cJSON *file_id = cJSON_GetObjectItemCaseSensitive(document, "file_id");
+          tgMsg->file->id = (char*)esp_calloc(1, strlen(file_id->valuestring)+1);
+          if (tgMsg->file->id) {
+            memcpy(tgMsg->file->id, file_id->valuestring, strlen(file_id->valuestring));
+          } else {
+            rlog_e(logTAG, "Failed to allocate memory for document file_id");
+            goto error;
+          };
+
+          if (cJSON_HasObjectItem(message, "caption")) {
+            cJSON *caption = cJSON_GetObjectItemCaseSensitive(message, "caption");
+            tgMsg->file->caption = (char*)esp_calloc(1, strlen(caption->valuestring)+1);
+            if (tgMsg->file->caption) {
+              memcpy(tgMsg->file->caption, caption->valuestring, strlen(caption->valuestring));
+              rlog_d(logTAG, "tgMsg->file->caption:%s\n", tgMsg->file->caption);
+
+            } else {
+              rlog_e(logTAG, "Failed to allocate memory for message caption");
+              goto error;
+            };
+          } else {
+            tgMsg->file->caption = nullptr;
+          }
+
+          cJSON *file_size = cJSON_GetObjectItemCaseSensitive(document, "file_size");
+          if (cJSON_IsNumber(file_size)) tgMsg->file->size = file_size->valuedouble;
+
+        } else {
+          rlog_e(logTAG, "Failed to allocate memory for document file_size");
+          goto error;
+        }
       }
 
       if (cJSON_HasObjectItem(message, "text")) {
         tgMsg->type = TG_MESSAGE_TEXT;
         cJSON *text = cJSON_GetObjectItemCaseSensitive(message, "text");
-        rlog_d(logTAG, "text len=%d. text:%s\n", strlen(text->valuestring), text->valuestring);
         tgMsg->text = (char*)esp_calloc(1, strlen(text->valuestring)+1);
         if (tgMsg->text) {
           memcpy(tgMsg->text, text->valuestring, strlen(text->valuestring));
@@ -524,17 +535,20 @@ bool tgReceiveMsg(cJSON *message, int update_id)
         };
       }
 
-      /*
-        int64_t chat_id;
-        int64_t from_id;
-        u_int32_t date;
-        int update_id;
-        char *text;
-        tgUpdateDocument_t *file;
-        enum tg_message_type_t type;
-      */
+      if (tgMsg->type > TG_MESSAGE_UNKNOWN) {
+        cJSON *chat = cJSON_GetObjectItemCaseSensitive(message, "chat");
+        cJSON *chat_id = cJSON_GetObjectItemCaseSensitive(chat, "id");
+        if (cJSON_IsNumber(chat_id)) tgMsg->chat_id = chat_id->valuedouble;
+        
+        cJSON *from = cJSON_GetObjectItemCaseSensitive(message, "from");
+        cJSON *from_id = cJSON_GetObjectItemCaseSensitive(from, "id");
+        if (cJSON_IsNumber(from_id)) tgMsg->from_id = from_id->valuedouble;
 
-      if (xQueueSend(_tgInboxQueue, &tgMsg, pdMS_TO_TICKS(CONFIG_TELEGRAM_INBOX_QUEUE_WAIT)) == pdPASS) {
+        cJSON *date = cJSON_GetObjectItemCaseSensitive(message, "date");
+        if (cJSON_IsNumber(date)) tgMsg->date = date->valuedouble;
+      }
+
+      if (xQueueSend(*_tgInboxQueue, &tgMsg, pdMS_TO_TICKS(CONFIG_TELEGRAM_INBOX_QUEUE_WAIT)) == pdPASS) {
         return true;
       } else {
         rloga_e("Failed to adding message to inbox queue [ _tgInboxQueue ]!");
@@ -548,6 +562,12 @@ bool tgReceiveMsg(cJSON *message, int update_id)
     // Deallocate resources from heap
     if (tgMsg) {
       if (tgMsg->text) free(tgMsg->text);
+      if (tgMsg->file) {
+        if (tgMsg->file->caption) free(tgMsg->file->caption);
+        if (tgMsg->file->name) free(tgMsg->file->name);
+        if (tgMsg->file->id) free(tgMsg->file->id);
+        free(tgMsg->file);
+      };
       free(tgMsg);
     };
   };
@@ -851,12 +871,13 @@ void tgTaskUpdatesExec(void *pvParameters)
   tgTaskDelete();
 }
 
-bool tgTaskUpdatesCreate()
+bool tgTaskUpdatesCreate(QueueHandle_t *cmdQueue)
 {
+  _tgInboxQueue = cmdQueue;
   if (!_tgTaskUpdates) {
-    if (!_tgInboxQueue) {
-      _tgInboxQueue = xQueueCreate(4, sizeof(tgUpdateMessage_t*));
-      if (!_tgInboxQueue) {
+    if (!*_tgInboxQueue) {
+      *_tgInboxQueue = xQueueCreate(4, sizeof(tgUpdateMessage_t*));
+      if (!*_tgInboxQueue) {
         rloga_e("Failed to create a queue for incoming updates from Telegram!");
         eventLoopPostError(RE_SYS_TELEGRAM_ERROR, ESP_FAIL);
         return false;
@@ -864,7 +885,7 @@ bool tgTaskUpdatesCreate()
     };
     xTaskCreatePinnedToCore(tgTaskUpdatesExec, tgTaskUpdatesName, 4096, nullptr, CONFIG_TASK_PRIORITY_TELEGRAM, &_tgTaskUpdates, CONFIG_TASK_CORE_TELEGRAM); 
     if (!_tgTaskUpdates) {
-      vQueueDelete(_tgInboxQueue);
+      vQueueDelete(*_tgInboxQueue);
       rloga_e("Failed to create task for Telegram updates!");
       eventLoopPostError(RE_SYS_TELEGRAM_ERROR, ESP_FAIL);
       return false;

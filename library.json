@@ -1,7 +1,7 @@
 {
   "name": "reTgSend",
-  "version": "3.1.2",
-  "description": "Sending notifications to Telegram. Receive messages and echo response",
+  "version": "3.1.3",
+  "description": "Sending messages and receive updates to/from Telegram.",
   "keywords": "telegram",
   "repository": {
     "type": "git",

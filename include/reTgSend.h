@@ -36,6 +36,30 @@
   #define CONFIG_TELEGRAM_OUTBOX_ENABLE 0
 #endif // CONFIG_TELEGRAM_OUTBOX_SIZE
 
+typedef struct {
+  char* caption;
+  char* id;
+  char* name;
+  int size;
+} tgUpdateDocument_t;
+
+enum tg_message_type_t {
+    TG_MESSAGE_UNKNOWN,
+    TG_MESSAGE_TEXT,
+    TG_MESSAGE_DOCUMENT,
+};
+
+typedef struct {
+  int64_t chat_id;
+  int64_t from_id;
+  u_int32_t date;
+  int update_id;
+  char *text;
+  tgUpdateDocument_t *file;
+  enum tg_message_type_t type;
+} tgUpdateMessage_t;
+
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,7 +76,7 @@ bool tgTaskCreate();
  * @brief We create and launch a task to handle telegram updates.
  * @return true - successful, false - failure
  * */
-bool tgTaskUpdatesCreate();
+bool tgTaskUpdatesCreate(QueueHandle_t *_tgInboxQueue);
 
 /**
  * @brief We pause the task for sending notifications. For example, when disconnecting from WiFi.
