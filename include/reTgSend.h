@@ -1,4 +1,4 @@
-/* 
+/*
    EN: Module for sending notifications to Telegram from ESP32
    RU: Отправка уведомлений в Telegram из ESP32
    --------------------------
@@ -25,31 +25,35 @@
 #include "cJSON.h"
 
 #if defined(CONFIG_TELEGRAM_MESSAGE_SIZE) && (CONFIG_TELEGRAM_MESSAGE_SIZE > 0)
-  #define CONFIG_TELEGRAM_STATIC_MESSAGE_BUFFER 1
+#define CONFIG_TELEGRAM_STATIC_MESSAGE_BUFFER 1
 #else
-  #define CONFIG_TELEGRAM_STATIC_MESSAGE_BUFFER 0
+#define CONFIG_TELEGRAM_STATIC_MESSAGE_BUFFER 0
 #endif // CONFIG_TELEGRAM_MESSAGE_SIZE
 
 #if defined(CONFIG_TELEGRAM_OUTBOX_SIZE) && (CONFIG_TELEGRAM_OUTBOX_SIZE > 0)
-  #define CONFIG_TELEGRAM_OUTBOX_ENABLE 1
+#define CONFIG_TELEGRAM_OUTBOX_ENABLE 1
 #else
-  #define CONFIG_TELEGRAM_OUTBOX_ENABLE 0
+#define CONFIG_TELEGRAM_OUTBOX_ENABLE 0
 #endif // CONFIG_TELEGRAM_OUTBOX_SIZE
 
-typedef struct {
-  char* caption;
-  char* id;
-  char* name;
+typedef struct
+{
+  char *caption;
+  char *id;
+  char *name;
   int size;
 } tgUpdateDocument_t;
 
-enum tg_message_type_t {
-    TG_MESSAGE_UNKNOWN,
-    TG_MESSAGE_TEXT,
-    TG_MESSAGE_DOCUMENT,
+enum tg_message_type_t
+{
+  TG_MESSAGE_UNKNOWN,
+  TG_MESSAGE_TEXT,
+  TG_MESSAGE_DOCUMENT,
+  TG_MESSAGE_LINKTOFILE
 };
 
-typedef struct {
+typedef struct
+{
   int64_t chat_id;
   int64_t from_id;
   u_int32_t date;
@@ -59,48 +63,49 @@ typedef struct {
   enum tg_message_type_t type;
 } tgUpdateMessage_t;
 
-
-
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
-esp_err_t tgApi();
+  esp_err_t tgApi();
+  esp_err_t tgGetFileApi(char *file_id);
+  bool tgSendLinkToFile(cJSON *result);
 
-/**
- * @brief We create and launch a task (and a queue) to send notifications.
- * @return true - successful, false - failure
- * */
-bool tgTaskCreate();
+  /**
+   * @brief We create and launch a task (and a queue) to send notifications.
+   * @return true - successful, false - failure
+   * */
+  bool tgTaskCreate();
 
-/**
- * @brief We create and launch a task to handle telegram updates.
- * @return true - successful, false - failure
- * */
-bool tgTaskUpdatesCreate(QueueHandle_t *_tgInboxQueue);
+  /**
+   * @brief We create and launch a task to handle telegram updates.
+   * @return true - successful, false - failure
+   * */
+  bool tgTaskUpdatesCreate(QueueHandle_t *_tgInboxQueue);
 
-/**
- * @brief We pause the task for sending notifications. For example, when disconnecting from WiFi.
- * @return true - successful, false - failure
- * */
-bool tgTaskSuspend();
-bool tgTaskResume();
+  /**
+   * @brief We pause the task for sending notifications. For example, when disconnecting from WiFi.
+   * @return true - successful, false - failure
+   * */
+  bool tgTaskSuspend();
+  bool tgTaskResume();
 
-/**
- * @brief Delete the task (for example, before restarting the device)
- * @return true - successful, false - failure
- * */
-bool tgTaskDelete();
+  /**
+   * @brief Delete the task (for example, before restarting the device)
+   * @return true - successful, false - failure
+   * */
+  bool tgTaskDelete();
 
-/**
- * Add a message to the send queue
- * @brief Add a message to the send queue. If the Internet is available, an attempt will be made to send a message almost immediately
- * @param msgOptions - message options (kind, priority and notification)
- * @param msgTitle - message header
- * @param msgText - message text or formatting template
- * @param ... - formatting options
- * @return true - successful, false - failure
- * */
-bool tgSendMsg(msg_options_t msgOptions, const char* msgTitle, const char* msgText, ...);
+  /**
+   * Add a message to the send queue
+   * @brief Add a message to the send queue. If the Internet is available, an attempt will be made to send a message almost immediately
+   * @param msgOptions - message options (kind, priority and notification)
+   * @param msgTitle - message header
+   * @param msgText - message text or formatting template
+   * @param ... - formatting options
+   * @return true - successful, false - failure
+   * */
+  bool tgSendMsg(msg_options_t msgOptions, const char *msgTitle, const char *msgText, ...);
 
 /**
  * Easier adding a message to the send queue
