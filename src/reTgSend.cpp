@@ -158,7 +158,7 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
         memcpy(output_buffer + output_len, evt->data, copy_len);
       }
       output_len += copy_len;
-      rlog_d(logTAG, "HTTP_EVENT_ON_DATA, получено=%d, copy_len=%d, output_len=%d", evt->data_len, copy_len, output_len);
+      //rlog_d(logTAG, "HTTP_EVENT_ON_DATA, получено=%d, copy_len=%d, output_len=%d", evt->data_len, copy_len, output_len);
     }
     break;
   case HTTP_EVENT_ON_FINISH:
@@ -216,9 +216,9 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
     break;
   case HTTP_EVENT_REDIRECT:
     rlog_d(logTAG, "HTTP_EVENT_REDIRECT");
-    esp_http_client_set_header(evt->client, "From", "user@example.com");
-    esp_http_client_set_header(evt->client, "Accept", "text/html");
-    esp_http_client_set_redirection(evt->client);
+    //esp_http_client_set_header(evt->client, "From", "user@example.com");
+    //esp_http_client_set_header(evt->client, "Accept", "text/html");
+    //esp_http_client_set_redirection(evt->client);
     break;
   }
   return ESP_OK;
@@ -784,7 +784,7 @@ bool tgSendLinkToFile(cJSON *result)
       }
 
       cJSON *file_size = cJSON_GetObjectItemCaseSensitive(result, "file_size");
-      const char fmt[] = "Для обновления прошивки выполните следующую комманду:\n"
+      static const char fmt[] = "Для обновления прошивки выполните следующую комманду:\n"
                          "/upgrade_%d\n"
                          "Файл: %s, размер: %d байт.";
       int f_sz = file_size->valuedouble ? file_size->valuedouble : 0;
@@ -1246,7 +1246,7 @@ void tgTaskUpdatesExec(void *pvParameters)
       else
       {
         rlog_e(logTAG, "Request to Telegram API failed. Error: %d", tgApiRequest);
-        vTaskDelay(pdMS_TO_TICKS(300));
+        vTaskDelay(pdMS_TO_TICKS(1000));
         break;
       };
     };
