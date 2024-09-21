@@ -1,6 +1,6 @@
 {
   "name": "reTgSend",
-  "version": "3.1.4",
+  "version": "3.1.5",
   "description": "Sending messages and receive updates to/from Telegram.",
   "keywords": "telegram",
   "repository": {

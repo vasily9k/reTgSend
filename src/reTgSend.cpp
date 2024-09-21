@@ -784,14 +784,14 @@ bool tgSendLinkToFile(cJSON *result)
       }
 
       cJSON *file_size = cJSON_GetObjectItemCaseSensitive(result, "file_size");
-      static const char fmt[] = "Для обновления прошивки выполните следующую комманду:\n"
-                         "/upgrade_%d\n"
-                         "Файл: %s, размер: %d байт.";
+      static const char fmt[] = "Получен файл №%d, размером %d байт.\n"
+                         "Для обновления прошивки выполните следующую комманду:\n"
+                         "/upgrade_%d\n";
       int f_sz = file_size->valuedouble ? file_size->valuedouble : 0;
 
-      int sz = snprintf(NULL, 0, fmt, file_number, (const char *)file_path->valuestring, f_sz);
+      int sz = snprintf(NULL, 0, fmt, file_number, f_sz, file_number);
       tgMsg->text = (char *)esp_calloc(1, sz + 1);
-      snprintf(tgMsg->text, sz + 1, fmt, file_number, (const char *)file_path->valuestring, f_sz);
+      snprintf(tgMsg->text, sz + 1, fmt, file_number, f_sz, file_number);
 
       if (xQueueSend(*_tgInboxQueue, &tgMsg, pdMS_TO_TICKS(CONFIG_TELEGRAM_INBOX_QUEUE_WAIT)) == pdPASS)
       {
