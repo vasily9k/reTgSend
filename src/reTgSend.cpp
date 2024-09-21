@@ -786,7 +786,7 @@ bool tgSendLinkToFile(cJSON *result)
       cJSON *file_size = cJSON_GetObjectItemCaseSensitive(result, "file_size");
       static const char fmt[] = "Получен файл №%d, размером %d байт.\n"
                          "Для обновления прошивки выполните команду\n"
-                         "/upgrade_%d\n";
+                         "/upgrade_%d";
       int f_sz = file_size->valuedouble ? file_size->valuedouble : 0;
 
       int sz = snprintf(NULL, 0, fmt, file_number, f_sz, file_number);
